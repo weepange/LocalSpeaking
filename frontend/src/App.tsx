@@ -281,6 +281,7 @@ function App() {
   const [selectedMemberId, setSelectedMemberId] = useState<number | null>(null)
   const [serverSettingsOpen, setServerSettingsOpen] = useState(false)
   const [serverSettingsTab, setServerSettingsTab] = useState<ServerSettingsTab>('general')
+  const [serverCreateOpen, setServerCreateOpen] = useState(false)
   const [profileUser, setProfileUser] = useState<ProfileCardUser | null>(null)
   const [directForm, setDirectForm] = useState({ username: '' })
   const [memberRoleIds, setMemberRoleIds] = useState<number[]>([])
@@ -533,7 +534,7 @@ function App() {
   }, [selectedChannelId, token, workspaceMode])
 
   useEffect(() => {
-    if (workspaceMode !== 'dm' || !selectedDirectConversationId || !token) {
+    if (workspaceMode !== 'friends' || !selectedDirectConversationId || !token) {
       return
     }
 
@@ -574,7 +575,7 @@ function App() {
       return
     }
 
-    if (workspaceMode === 'dm' && (!conversationId || !user)) {
+    if (workspaceMode === 'friends' && (!conversationId || !user)) {
       socketRef.current?.close()
       socketRef.current = null
       return
@@ -611,7 +612,7 @@ function App() {
           message?: string
         }
 
-        if (workspaceMode === 'dm') {
+        if (workspaceMode === 'friends') {
           const nextMessage: DirectMessage = {
             id: payload.id ?? Date.now(),
             conversation: payload.conversation ?? conversationId ?? 0,
@@ -673,12 +674,12 @@ function App() {
   const selectedMember =
     members.find((member) => member.id === selectedMemberId) ?? null
   const canManageServer = Boolean(currentUser && activeServer?.is_owner)
-  const activeMessages = workspaceMode === 'dm' ? directMessages : messages
+  const activeMessages = workspaceMode === 'friends' ? directMessages : messages
   const activeTitle =
-    workspaceMode === 'dm'
+    workspaceMode === 'friends'
       ? activeDirectConversation
         ? `@${conversationPartner(activeDirectConversation, currentUser?.id ?? 0)?.username ?? 'DM'}`
-        : 'Direct Messages'
+        : 'Friends'
       : activeChannel
         ? `#${activeChannel.name}`
         : 'No channel selected'
@@ -810,6 +811,7 @@ function App() {
       const nextServer = response.data
       setServers((current) => [nextServer, ...current.filter((server) => server.id !== nextServer.id)])
       setServerForm({ name: '' })
+      setServerCreateOpen(false)
       setSelectedServerId(nextServer.id)
       setWorkspaceMode('server')
       setSelectedChannelId(null)
@@ -862,6 +864,46 @@ function App() {
       setServerSettingsOpen(false)
     } catch {
       setStatusMessage('Could not update the server settings.')
+    } finally {
+      setIsManaging(false)
+    }
+  }
+
+  const handleDeleteServer = async () => {
+    if (!token || !activeServer || !canManageServer) {
+      return
+    }
+
+    const confirmed = window.confirm(`Delete server "${activeServer.name}"? This cannot be undone.`)
+
+    if (!confirmed) {
+      return
+    }
+
+    setIsManaging(true)
+
+    try {
+      await api.delete(`/api/servers/${activeServer.id}/`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      const removedServerId = activeServer.id
+      setServers((current) => current.filter((server) => server.id !== removedServerId))
+      setSelectedServerId(null)
+      setSelectedChannelId(null)
+      setSelectedMemberId(null)
+      setMemberRoleIds([])
+      setChannels([])
+      setRoles([])
+      setMembers([])
+      setMessages([])
+      setSocketState('idle')
+      setServerSettingsOpen(false)
+      setStatusMessage(`Deleted server "${activeServer.name}".`)
+    } catch {
+      setStatusMessage('Could not delete the server.')
     } finally {
       setIsManaging(false)
     }
@@ -1096,12 +1138,48 @@ function App() {
     }
   }
 
+  const handleRemoveMember = async (member: Member) => {
+    if (!token || !activeServer || !canManageServer) {
+      return
+    }
+
+    const confirmed = window.confirm(`Remove ${member.username} from "${activeServer.name}"?`)
+
+    if (!confirmed) {
+      return
+    }
+
+    setIsManaging(true)
+
+    try {
+      await api.delete(`/api/servers/members/${member.id}/`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      })
+
+      setMembers((current) => current.filter((item) => item.id !== member.id))
+      if (selectedMemberId === member.id) {
+        setSelectedMemberId(null)
+        setMemberRoleIds([])
+      }
+      setStatusMessage(`Removed ${member.username} from the server.`)
+    } catch (error: unknown) {
+      setStatusMessage(
+        extractErrorMessage(error, 'Could not remove that member.'),
+      )
+    } finally {
+      setIsManaging(false)
+    }
+  }
+
   const handleSendMessage = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
 
     const content = composer.trim()
 
-    const targetId = workspaceMode === 'dm' ? selectedDirectConversationId : selectedChannelId
+    const targetId =
+      workspaceMode === 'friends' ? selectedDirectConversationId : selectedChannelId
     const targetSocket = socketRef.current
 
     if (!content || !currentUser || !targetId || !token) {
@@ -1143,7 +1221,7 @@ function App() {
         conversation,
         ...current.filter((item) => item.id !== conversation.id),
       ])
-      setWorkspaceMode('dm')
+      setWorkspaceMode('friends')
       setSelectedServerId(null)
       setSelectedChannelId(null)
       setSelectedDirectConversationId(conversation.id)
@@ -1187,7 +1265,7 @@ function App() {
         conversation,
         ...current.filter((item) => item.id !== conversation.id),
       ])
-      setWorkspaceMode('dm')
+      setWorkspaceMode('friends')
       setSelectedServerId(null)
       setSelectedChannelId(null)
       setSelectedDirectConversationId(conversation.id)
@@ -1292,24 +1370,37 @@ function App() {
         <section className="card">
           <div className="card-head">
             <h2>Servers</h2>
-            <span className="muted">{servers.length} total</span>
+            <div className="card-head-actions">
+              <span className="muted">{servers.length} total</span>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label={serverCreateOpen ? 'Close server creator' : 'Create server'}
+                onClick={() => setServerCreateOpen((current) => !current)}
+                disabled={!currentUser}
+              >
+                +
+              </button>
+            </div>
           </div>
 
-          <form className="inline-form" onSubmit={handleCreateServer}>
-            <input
-              value={serverForm.name}
-              onChange={(event) =>
-                setServerForm({
-                  name: event.target.value,
-                })
-              }
-              placeholder="New server name"
-              disabled={!currentUser}
-            />
-            <button className="secondary-button" type="submit" disabled={!currentUser || isManaging}>
-              Create
-            </button>
-          </form>
+          {serverCreateOpen ? (
+            <form className="inline-form" onSubmit={handleCreateServer}>
+              <input
+                value={serverForm.name}
+                onChange={(event) =>
+                  setServerForm({
+                    name: event.target.value,
+                  })
+                }
+                placeholder="New server name"
+                disabled={!currentUser}
+              />
+              <button className="secondary-button" type="submit" disabled={!currentUser || isManaging}>
+                Create
+              </button>
+            </form>
+          ) : null}
 
           {isLoadingServers ? <p className="placeholder">Loading servers...</p> : null}
 
@@ -1355,8 +1446,30 @@ function App() {
 
         <section className="card">
           <div className="card-head">
-            <h2>Direct Messages</h2>
-            <span className="muted">{directConversations.length} total</span>
+            <h2>Friends</h2>
+            <div className="card-head-actions">
+              <span className="muted">{directConversations.length} chats</span>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => {
+                  socketRef.current?.close()
+                  socketRef.current = null
+                  setWorkspaceMode('friends')
+                  setSocketState(selectedDirectConversationId ? 'connecting' : 'idle')
+                  setSelectedServerId(null)
+                  setSelectedChannelId(null)
+                  setMessages([])
+                  if (!selectedDirectConversationId) {
+                    setDirectMessages([])
+                    setMessageIdsToEmpty()
+                  }
+                }}
+                disabled={!currentUser}
+              >
+                Open
+              </button>
+            </div>
           </div>
 
           <form className="stack-form" onSubmit={handleStartDirectMessageByUsername}>
@@ -1382,11 +1495,15 @@ function App() {
                 <button
                   key={conversation.id}
                   type="button"
-                  className={`list-item ${conversation.id === selectedDirectConversationId && workspaceMode === 'dm' ? 'active' : ''}`}
+                  className={`list-item ${
+                    conversation.id === selectedDirectConversationId && workspaceMode === 'friends'
+                      ? 'active'
+                      : ''
+                  }`}
                   onClick={() => {
                     socketRef.current?.close()
                     socketRef.current = null
-                    setWorkspaceMode('dm')
+                    setWorkspaceMode('friends')
                     setSocketState('connecting')
                     setSelectedServerId(null)
                     setSelectedChannelId(null)
@@ -1417,16 +1534,16 @@ function App() {
           <div>
             <span className="eyebrow">Workspace</span>
             <h2>
-              {workspaceMode === 'dm'
-                ? 'Direct Messages'
+              {workspaceMode === 'friends'
+                ? 'Friends'
                 : activeServer
                   ? activeServer.name
                   : 'Choose a server'}{' '}
               <span className="muted">/ {activeTitle}</span>
             </h2>
             <p>
-              {workspaceMode === 'dm'
-                ? 'Private chats behave like Discord DMs and are separate from servers.'
+              {workspaceMode === 'friends'
+                ? 'This hub keeps direct conversations separate from servers, like Discord friends and DMs.'
                 : currentUser
                   ? 'REST keeps the directory in sync, and WebSocket handles live chat.'
                   : 'Sign in to create servers, channels, roles, and messages.'}
@@ -1642,105 +1759,168 @@ function App() {
               </div>
             </>
           ) : (
-            <div className="card chat-card dm-chat-card">
-              <div className="chat-topline">
-                <div>
-                  <span className="eyebrow">Direct message</span>
-                  <h2>{activeDirectConversation ? activeTitle : 'Choose a conversation'}</h2>
+            <>
+              <div className="card friends-card">
+                <div className="card-head">
+                  <h2>Friends</h2>
+                  <span className="muted">{directConversations.length} active chats</span>
                 </div>
-                <span className="muted">Private</span>
-              </div>
 
-              <div className="chat-feed" ref={messageFeedRef}>
-                {isLoadingMessages ? <p className="placeholder">Loading messages...</p> : null}
-
-                {!currentUser ? (
-                  <div className="empty-state">
-                    <h3>Authentication required</h3>
-                    <p>Sign in to use direct messages.</p>
-                  </div>
-                ) : null}
-
-                {currentUser && !activeDirectConversation ? (
-                  <div className="empty-state">
-                    <h3>Select a DM</h3>
-                    <p>Pick a person from the list or open a profile to start talking.</p>
-                  </div>
-                ) : null}
-
-                {currentUser && activeDirectConversation && activeMessages.length === 0 && !isLoadingMessages ? (
-                  <div className="empty-state">
-                    <h3>No messages yet</h3>
-                    <p>Send the first private message.</p>
-                  </div>
-                ) : null}
-
-                {activeMessages.map((message, index) => {
-                  const previous = activeMessages[index - 1]
-                  const showAvatar = index === 0 || previous.author !== message.author
-                  const authorUser =
-                    activeDirectConversation?.members.find((member) => member.id === message.author) ??
-                    (currentUser?.id === message.author ? currentUser : null)
-
-                  return (
-                    <article className={`message-row ${showAvatar ? '' : 'message-row-grouped'}`} key={message.id}>
-                      {showAvatar ? (
-                        <div className="avatar small">
-                          {initials(message.author_username) || 'U'}
-                        </div>
-                      ) : (
-                        <div className="message-spacer" />
-                      )}
-                      <div className="message-body">
-                        <div className="message-head">
-                          <button
-                            type="button"
-                            className="message-author-button"
-                            onClick={() => authorUser && openProfile(authorUser)}
-                            disabled={!authorUser}
-                          >
-                            <strong>{message.author_username}</strong>
-                          </button>
-                          <span>{formatDate(message.created_at)}</span>
-                          {message.edited_at ? <span>edited</span> : null}
-                        </div>
-                        <p>{message.content}</p>
-                      </div>
-                    </article>
-                  )
-                })}
-              </div>
-
-              <form className="composer" onSubmit={handleSendMessage}>
-                <textarea
-                  value={composer}
-                  onChange={(event) => setComposer(event.target.value)}
-                  placeholder={
-                    currentUser && activeDirectConversation
-                      ? `Message ${activeTitle}`
-                      : 'Select a direct message'
-                  }
-                  disabled={!currentUser || !activeDirectConversation || socketState !== 'live'}
-                  rows={4}
-                />
-
-                <div className="composer-footer">
-                  <span className="helper">Enter to send. Shift + Enter for a new line.</span>
-                  <button
-                    className="primary-button"
-                    type="submit"
-                    disabled={
-                      !composer.trim() ||
-                      !currentUser ||
-                      !activeDirectConversation ||
-                      socketState !== 'live'
+                <form className="stack-form friends-launcher" onSubmit={handleStartDirectMessageByUsername}>
+                  <input
+                    value={directForm.username}
+                    onChange={(event) =>
+                      setDirectForm({ username: event.target.value })
                     }
-                  >
-                    Send
+                    placeholder="Add or message by username"
+                    disabled={!currentUser}
+                  />
+
+                  <button className="secondary-button" type="submit" disabled={!currentUser || isManaging}>
+                    Start chat
                   </button>
+                </form>
+
+                <div className="list friends-list">
+                  {directConversations.map((conversation) => {
+                    const partner = conversationPartner(conversation, currentUser?.id ?? 0)
+
+                    return (
+                      <button
+                        key={conversation.id}
+                        type="button"
+                        className={`list-item ${conversation.id === selectedDirectConversationId ? 'active' : ''}`}
+                        onClick={() => {
+                          socketRef.current?.close()
+                          socketRef.current = null
+                          setWorkspaceMode('friends')
+                          setSocketState('connecting')
+                          setSelectedServerId(null)
+                          setSelectedChannelId(null)
+                          setSelectedDirectConversationId(conversation.id)
+                          setMessages([])
+                          setDirectMessages([])
+                          setMessageIdsToEmpty()
+                        }}
+                      >
+                        <span className="list-icon channel-mark">
+                          {initials(partner?.username || 'DM') || '@'}
+                        </span>
+                        <span className="list-copy">
+                          <strong>{partner?.username ?? 'Unknown'}</strong>
+                          <small>{conversation.last_message?.content || 'No messages yet'}</small>
+                        </span>
+                      </button>
+                    )
+                  })}
                 </div>
-              </form>
-            </div>
+
+                {!currentUser ? <p className="placeholder">Sign in to manage your friend chats.</p> : null}
+                {currentUser && directConversations.length === 0 ? (
+                  <p className="placeholder">Start a conversation by username or from a user profile.</p>
+                ) : null}
+              </div>
+
+              <div className="card chat-card friends-chat-card">
+                <div className="chat-topline">
+                  <div>
+                    <span className="eyebrow">Direct message</span>
+                    <h2>{activeDirectConversation ? activeTitle : 'Choose a conversation'}</h2>
+                  </div>
+                  <span className="muted">Private</span>
+                </div>
+
+                <div className="chat-feed" ref={messageFeedRef}>
+                  {isLoadingMessages ? <p className="placeholder">Loading messages...</p> : null}
+
+                  {!currentUser ? (
+                    <div className="empty-state">
+                      <h3>Authentication required</h3>
+                      <p>Sign in to use direct messages.</p>
+                    </div>
+                  ) : null}
+
+                  {currentUser && !activeDirectConversation ? (
+                    <div className="empty-state">
+                      <h3>Select a DM</h3>
+                      <p>Pick a person from the friends list or open a profile to start talking.</p>
+                    </div>
+                  ) : null}
+
+                  {currentUser && activeDirectConversation && activeMessages.length === 0 && !isLoadingMessages ? (
+                    <div className="empty-state">
+                      <h3>No messages yet</h3>
+                      <p>Send the first private message.</p>
+                    </div>
+                  ) : null}
+
+                  {activeMessages.map((message, index) => {
+                    const previous = activeMessages[index - 1]
+                    const showAvatar = index === 0 || previous.author !== message.author
+                    const authorUser =
+                      activeDirectConversation?.members.find((member) => member.id === message.author) ??
+                      (currentUser?.id === message.author ? currentUser : null)
+
+                    return (
+                      <article className={`message-row ${showAvatar ? '' : 'message-row-grouped'}`} key={message.id}>
+                        {showAvatar ? (
+                          <div className="avatar small">
+                            {initials(message.author_username) || 'U'}
+                          </div>
+                        ) : (
+                          <div className="message-spacer" />
+                        )}
+                        <div className="message-body">
+                          <div className="message-head">
+                            <button
+                              type="button"
+                              className="message-author-button"
+                              onClick={() => authorUser && openProfile(authorUser)}
+                              disabled={!authorUser}
+                            >
+                              <strong>{message.author_username}</strong>
+                            </button>
+                            <span>{formatDate(message.created_at)}</span>
+                            {message.edited_at ? <span>edited</span> : null}
+                          </div>
+                          <p>{message.content}</p>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+
+                <form className="composer" onSubmit={handleSendMessage}>
+                  <textarea
+                    value={composer}
+                    onChange={(event) => setComposer(event.target.value)}
+                    placeholder={
+                      currentUser && activeDirectConversation
+                        ? `Message ${activeTitle}`
+                        : 'Select a direct message'
+                    }
+                    disabled={!currentUser || !activeDirectConversation || socketState !== 'live'}
+                    rows={4}
+                  />
+
+                  <div className="composer-footer">
+                    <span className="helper">Enter to send. Shift + Enter for a new line.</span>
+                    <button
+                      className="primary-button"
+                      type="submit"
+                      disabled={
+                        !composer.trim() ||
+                        !currentUser ||
+                        !activeDirectConversation ||
+                        socketState !== 'live'
+                      }
+                    >
+                      Send
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </>
           )}
         </section>
       </main>
@@ -1820,6 +2000,18 @@ function App() {
                     Save changes
                   </button>
                 </div>
+
+                {canManageServer ? (
+                  <div className="danger-zone">
+                    <div>
+                      <strong>Delete server</strong>
+                      <p className="muted">This removes every channel, role, and message in this server.</p>
+                    </div>
+                    <button className="danger-button" type="button" onClick={handleDeleteServer} disabled={isManaging}>
+                      Delete server
+                    </button>
+                  </div>
+                ) : null}
               </form>
             ) : null}
 
@@ -2041,6 +2233,23 @@ function App() {
                           <span className="muted">No roles yet</span>
                         )}
                       </div>
+
+                      {canManageServer && selectedMember.user !== activeServer.owner ? (
+                        <div className="danger-zone compact">
+                          <div>
+                            <strong>Remove member</strong>
+                            <p className="muted">This kicks the member from the server immediately.</p>
+                          </div>
+                          <button
+                            className="danger-button"
+                            type="button"
+                            onClick={() => void handleRemoveMember(selectedMember)}
+                            disabled={isManaging}
+                          >
+                            Remove member
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="permissions-grid">

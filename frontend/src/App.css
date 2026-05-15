@@ -93,6 +93,12 @@
   margin-bottom: 14px;
 }
 
+.card-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -202,7 +208,9 @@
 
 .primary-button,
 .secondary-button,
-.ghost-button {
+.ghost-button,
+.icon-button,
+.danger-button {
   border: 0;
   border-radius: 14px;
   padding: 12px 16px;
@@ -233,9 +241,29 @@
   border: 1px solid rgba(148, 163, 184, 0.16);
 }
 
+.icon-button {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: 14px;
+  color: #f8fbff;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.26), rgba(34, 211, 238, 0.12));
+  border: 1px solid rgba(125, 211, 252, 0.28);
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.danger-button {
+  color: #fee2e2;
+  background: rgba(127, 29, 29, 0.9);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+}
+
 .primary-button:hover,
 .secondary-button:hover,
 .ghost-button:hover,
+.icon-button:hover,
+.danger-button:hover,
 .list-item:hover,
 .role-chip:hover,
 .member-row:hover {
@@ -244,7 +272,9 @@
 
 .primary-button:disabled,
 .secondary-button:disabled,
-.ghost-button:disabled {
+.ghost-button:disabled,
+.icon-button:disabled,
+.danger-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
   transform: none;
@@ -671,6 +701,24 @@
   grid-column: 1 / -1;
 }
 
+.friends-card {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+}
+
+.friends-list {
+  align-content: start;
+}
+
+.friends-launcher {
+  margin-bottom: 2px;
+}
+
+.friends-chat-card {
+  grid-column: span 2;
+}
+
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -745,6 +793,25 @@
   flex-wrap: wrap;
 }
 
+.danger-zone {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  background: rgba(69, 10, 10, 0.28);
+}
+
+.danger-zone.compact {
+  margin-top: 4px;
+}
+
+.danger-zone strong {
+  color: #fee2e2;
+}
+
 .profile-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -781,6 +848,10 @@
   .admin-card {
     order: 3;
   }
+
+  .friends-chat-card {
+    grid-column: auto;
+  }
 }
 
 @media (max-width: 840px) {
@@ -791,7 +862,8 @@
 
   .workspace-head,
   .chat-topline,
-  .composer-footer {
+  .composer-footer,
+  .danger-zone {
     flex-direction: column;
     align-items: stretch;
   }
