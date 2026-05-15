@@ -1,46 +1,33 @@
 # LocalSpeaking
 
-LocalSpeaking — self-hosted платформа для общения, вдохновлённая Discord.
+LocalSpeaking - self-hosted chat platform, inspired by Discord.
 
-Проект позволяет поднять собственный сервер общения локально, на VPS или домашнем сервере, чтобы пользователи могли подключаться напрямую без централизованной инфраструктуры.
+The project is built to run locally, on a VPS, or on your own server so people can talk directly without relying on a centralized platform.
 
-## Содержание
+## What it does now
 
-- [Описание](#описание)
-- [Используемый стек](#используемый-стек)
-- [Текущие возможности](#текущие-возможности)
-- [Структура проекта](#структура-проекта)
-- [Установка проекта](#установка-проекта)
-- [Запуск backend](#запуск-backend)
-- [Запуск frontend](#запуск-frontend)
-- [Адреса сервисов](#адреса-сервисов)
-- [Текущая архитектура](#текущая-архитектура)
-- [Планы по развитию](#планы-по-развитию)
-- [Статус проекта](#статус-проекта)
-- [Цель проекта](#цель-проекта)
+- servers with ownership and member management;
+- text and voice channels;
+- Discord-like roles and permissions;
+- server settings in a dedicated modal;
+- server member management and role assignment;
+- direct messages and a separate Friends/DM area;
+- realtime chat over WebSockets;
+- JWT login;
+- Django REST API;
+- React + TypeScript frontend.
 
-## Описание
-
-LocalSpeaking строится как модульная realtime-платформа с поддержкой:
-
-- серверов;
-- каналов;
-- сообщений;
-- WebSocket-realtime-связи;
-- Docker-развёртывания;
-- self-hosted архитектуры.
-
-## Используемый стек
+## Stack
 
 ### Backend
 
-- Django
+- Django 6
 - Django REST Framework
 - Django Channels
 - Daphne
 - PostgreSQL
 - Redis
-- WebSockets
+- JWT auth with SimpleJWT
 
 ### Frontend
 
@@ -48,33 +35,11 @@ LocalSpeaking строится как модульная realtime-платфор
 - TypeScript
 - Vite
 
-### Инфраструктура
+### Infrastructure
 
-- Docker
-- Docker Compose
+- Docker / Docker Compose
 
-## Текущие возможности
-
-### Backend
-
-- кастомная система пользователей;
-- модель серверов;
-- модель каналов;
-- модель сообщений;
-- REST API;
-- интеграция PostgreSQL;
-- Django admin панель;
-- базовая WebSocket-архитектура.
-
-### Frontend
-
-- React-интерфейс;
-- динамический sidebar серверов;
-- динамический список каналов;
-- связь frontend ↔ backend;
-- подготовленная realtime-архитектура.
-
-## Структура проекта
+## Project structure
 
 ```text
 LocalSpeaking/
@@ -84,29 +49,66 @@ LocalSpeaking/
 ├── messages_app/
 ├── config/
 ├── frontend/
-│   ├── src/
-│   └── public/
-├── docker-compose.yml
 ├── manage.py
 └── requirements.txt
 ```
 
-## Установка проекта
+## Main features
 
-### Клонирование репозитория
+### Servers
+
+- create servers from the UI;
+- edit server settings in a modal;
+- delete servers;
+- see server member and channel counts;
+- switch between multiple servers quickly.
+
+### Channels
+
+- create text and voice channels;
+- pick a channel and chat in realtime;
+- manage channels from server settings.
+
+### Roles and permissions
+
+- Discord-like role model;
+- `@everyone` default role;
+- admin role on server creation;
+- full permission set for text and voice permissions;
+- role hoisting, mentionable flag, icon support;
+- change role order;
+- assign roles to members from the settings modal.
+
+### Members
+
+- invite members by username;
+- open a member profile from the message list;
+- assign and remove roles from a member;
+- remove members from a server.
+
+### Direct messages
+
+- start a DM from the Friends/DM area;
+- open a DM from a profile card;
+- separate private chat mode from server chat;
+- realtime DM messaging.
+
+## Setup
+
+### Clone the repo
 
 ```bash
 git clone <repo_url>
 cd LocalSpeaking
 ```
 
-### Создание виртуального окружения
+### Create a virtual environment
 
 ```bash
 python -m venv venv
 ```
 
-### Активация venv
+### Activate it
 
 #### Linux / macOS
 
@@ -120,148 +122,129 @@ source venv/bin/activate
 venv\Scripts\activate
 ```
 
-### Установка зависимостей backend
+### Install backend dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Запуск PostgreSQL и Redis через Docker
+### Start PostgreSQL and Redis
 
 ```bash
 docker compose up -d
 ```
 
-## Запуск backend
+## Backend run
 
-### Применение миграций
+### Apply migrations
 
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
-Если схема базы уже создана, обычно достаточно только `migrate`.
+If this is the first setup, migrations are required before creating servers or roles.
 
-### Создание superuser
+### Optional: create admin user
 
 ```bash
 python manage.py createsuperuser
 ```
 
-### Запуск ASGI-сервера
+### Start the ASGI server
 
 ```bash
-daphne -b 0.0.0.0 -p 8000 config.asgi:application
+DJANGO_DEBUG=false daphne -b 0.0.0.0 -p 8000 config.asgi:application
 ```
 
-Backend будет доступен по адресу `http://127.0.0.1:8000`.
+If you want verbose debug pages locally, use:
 
-## Запуск frontend
+```bash
+DJANGO_DEBUG=true daphne -b 0.0.0.0 -p 8000 config.asgi:application
+```
 
-### Переход в frontend
+Backend API:
+
+- `http://127.0.0.1:8000`
+
+## Frontend run
+
+### Install frontend dependencies
 
 ```bash
 cd frontend
-```
-
-### Установка зависимостей
-
-```bash
 npm install
 ```
 
-### Запуск dev-сервера
+### Start the dev server
 
 ```bash
 npm run dev
 ```
 
-Frontend будет доступен по адресу `http://localhost:5173`.
+Frontend:
 
-## Адреса сервисов
+- `http://localhost:5173`
 
+## Available endpoints
+
+- API: `http://127.0.0.1:8000`
+- Admin: `http://127.0.0.1:8000/admin`
 - Frontend: `http://localhost:5173`
-- Backend API: `http://127.0.0.1:8000`
-- Django Admin: `http://127.0.0.1:8000/admin`
 
-## Текущая архитектура
+## Architecture notes
 
-### Servers
+### Authentication
 
-Серверы являются основными пространствами общения.
+- JWT-based login;
+- `/api/users/login/` returns access and refresh tokens;
+- `/api/users/me/` returns the current authenticated user.
 
-Каждый сервер:
+### Servers and roles
 
-- содержит каналы;
-- имеет владельца;
-- хранит участников.
+- each server has an owner;
+- each server has default and admin roles created on setup;
+- roles store Discord-style permissions as boolean flags;
+- members can have multiple roles.
 
-### Channels
+### Messaging
 
-Каналы принадлежат серверу и используются для общения.
+- server chat uses channel-based WebSockets;
+- direct messages use a separate conversation model and socket route;
+- history is loaded through REST;
+- realtime updates are delivered through Channels.
 
-Поддерживаются:
+## Current roadmap
 
-- text channels;
-- voice channels, которые находятся в разработке.
+- channel permission overwrites;
+- server categories;
+- richer Friends page;
+- friend requests;
+- message edit/delete and reactions;
+- mentions and clickable user popovers;
+- unread indicators;
+- typing status;
+- voice chat.
 
-### Messages
+## Status
 
-Сообщения принадлежат каналам и пользователям.
+The project is actively in development.
 
-Планируется:
+Already working:
 
-- realtime-доставка;
-- WebSocket broadcasting;
-- история сообщений;
-- редактирование сообщений.
+- JWT login;
+- server/channel creation;
+- Discord-like roles and permissions;
+- server member management;
+- server settings modal;
+- direct messages;
+- realtime message delivery;
+- React + Django split frontend/backend architecture.
 
-## Планы по развитию
+## Goal
 
-### Realtime
+Build a fully self-hosted Discord alternative where the owner controls:
 
-- WebSocket-чат;
-- live-обновления;
-- online status;
-- typing events.
-
-### Voice
-
-- voice channels;
-- P2P-соединения;
-- WebRTC.
-
-### Self-hosting
-
-- автоматическое Docker-развёртывание;
-- конфигурация сервера через UI;
-- поддержка VPS и домашних серверов.
-
-### Безопасность
-
-- JWT-авторизация;
-- роли и permissions;
-- приватные серверы.
-
-## Статус проекта
-
-Проект находится в активной разработке.
-
-На текущем этапе уже реализованы:
-
-- backend API;
-- frontend интерфейс;
-- система серверов;
-- система каналов;
-- базовая realtime-инфраструктура.
-
-## Цель проекта
-
-Создать полноценную self-hosted альтернативу Discord, где пользователь полностью контролирует:
-
-- сервер;
-- данные;
-- инфраструктуру;
-- подключение друзей.
-
+- the server;
+- the data;
+- the infrastructure;
+- the people who can connect.
