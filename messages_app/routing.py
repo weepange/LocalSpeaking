@@ -1,5 +1,5 @@
 from django.urls import re_path
-from .consumers import ChatConsumer, DirectMessageConsumer
+from .consumers import ChatConsumer, DirectMessageConsumer, VoiceConsumer
 
 
 websocket_urlpatterns = [
@@ -10,5 +10,9 @@ websocket_urlpatterns = [
     re_path(
         r'ws/dm/(?P<conversation_id>\w+)/$',
         DirectMessageConsumer.as_asgi()
+    ),
+    re_path(
+        r'ws/voice/(?P<channel_id>\w+)/$',
+        VoiceConsumer.as_asgi()
     ),
 ]

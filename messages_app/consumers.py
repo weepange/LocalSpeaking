@@ -193,3 +193,64 @@ class DirectMessageConsumer(AsyncWebsocketConsumer):
             'created_at': event['created_at'],
             'edited_at': event['edited_at'],
         }))
+
+
+class VoiceConsumer(AsyncWebsocketConsumer):
+
+    async def connect(self):
+        self.channel_id = self.scope['url_route']['kwargs']['channel_id']
+        self.room_group_name = f'voice_{self.channel_id}'
+
+        await self.channel_layer.group_add(
+            self.room_group_name,
+            self.channel_name,
+        )
+
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(
+            self.room_group_name,
+            self.channel_name,
+        )
+
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'voice_signal',
+                'action': 'leave',
+                'from': self.scope['user'].id if self.scope['user'].is_authenticated else None,
+            },
+        )
+
+    async def receive(self, text_data=None, bytes_data=None):
+        if not text_data:
+            return
+
+        data = json.loads(text_data)
+        action = data.get('action')
+        from_user = data.get('from')
+
+        if not action or from_user is None:
+            return
+
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'voice_signal',
+                'action': action,
+                'from': from_user,
+                'to': data.get('to'),
+                'username': data.get('username'),
+                'payload': data.get('payload'),
+            },
+        )
+
+    async def voice_signal(self, event):
+        await self.send(text_data=json.dumps({
+            'action': event['action'],
+            'from': event.get('from'),
+            'to': event.get('to'),
+            'username': event.get('username'),
+            'payload': event.get('payload'),
+        }))

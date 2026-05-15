@@ -207,11 +207,16 @@ const timeFormatter = new Intl.DateTimeFormat('en', {
   minute: '2-digit',
 })
 
-function buildWebSocketUrl(kind: 'chat' | 'dm', id: number) {
+function buildWebSocketUrl(kind: 'chat' | 'dm' | 'voice', id: number) {
   const url = new URL(API_BASE)
 
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
-  url.pathname = kind === 'chat' ? `/ws/chat/${id}/` : `/ws/dm/${id}/`
+  url.pathname =
+    kind === 'chat'
+      ? `/ws/chat/${id}/`
+      : kind === 'dm'
+        ? `/ws/dm/${id}/`
+        : `/ws/voice/${id}/`
   url.search = ''
 
   return url.toString()
@@ -236,6 +241,86 @@ function roleIdsFromMember(member: Member | null) {
 
 function conversationPartner(conversation: DirectConversation, userId: number) {
   return conversation.members.find((member) => member.id !== userId) ?? null
+}
+
+function buildVoicePeerConnection(
+  remoteUserId: number,
+  remoteUsername: string,
+  localStream: MediaStream | null,
+  audioRefs: { current: Record<number, HTMLAudioElement | null> },
+  videoRefs: { current: Record<number, HTMLVideoElement | null> },
+  remoteStreams: { current: Record<number, MediaStream> },
+  onParticipantUpdate: (participant: { id: number; username: string }) => void,
+  onRemoveParticipant: (remoteUserId: number) => void,
+  onSendSignal: (signal: Record<string, unknown>) => void,
+) {
+  const pc = new RTCPeerConnection({
+    iceServers: [
+      { urls: ['stun:stun.l.google.com:19302'] },
+    ],
+  })
+
+  if (localStream) {
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream))
+  }
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      onSendSignal({
+        action: 'candidate',
+        to: remoteUserId,
+        payload: {
+          candidate: event.candidate,
+        },
+      })
+    }
+  }
+
+  pc.ontrack = (event) => {
+    let stream = event.streams[0]
+
+    if (!stream) {
+      stream = new MediaStream()
+    }
+
+    if (event.track && !stream.getTrackById(event.track.id)) {
+      stream.addTrack(event.track)
+    }
+
+    if (remoteStreams.current[remoteUserId]) {
+      const existingStream = remoteStreams.current[remoteUserId]
+      if (!existingStream.getTrackById(event.track.id)) {
+        existingStream.addTrack(event.track)
+      }
+      stream = existingStream
+    }
+
+    remoteStreams.current[remoteUserId] = stream
+    onParticipantUpdate({ id: remoteUserId, username: remoteUsername })
+
+    const audioElement = audioRefs.current[remoteUserId]
+    if (audioElement) {
+      audioElement.srcObject = stream
+    }
+
+    const videoElement = videoRefs.current[remoteUserId]
+    if (videoElement) {
+      videoElement.srcObject = stream
+    }
+  }
+
+  pc.onconnectionstatechange = () => {
+    if (
+      pc.connectionState === 'failed' ||
+      pc.connectionState === 'closed' ||
+      pc.connectionState === 'disconnected'
+    ) {
+      pc.close()
+      onRemoveParticipant(remoteUserId)
+    }
+  }
+
+  return pc
 }
 
 function extractErrorMessage(error: unknown, fallback: string) {
@@ -356,8 +441,221 @@ function App() {
   )
 
   const socketRef = useRef<WebSocket | null>(null)
+  const voiceSocketRef = useRef<WebSocket | null>(null)
   const messageIdsRef = useRef<Set<number>>(new Set())
   const messageFeedRef = useRef<HTMLDivElement | null>(null)
+  const voiceLocalStreamRef = useRef<MediaStream | null>(null)
+  const voiceScreenStreamRef = useRef<MediaStream | null>(null)
+  const voicePeersRef = useRef<Record<number, RTCPeerConnection>>({})
+  const voiceAudioRefs = useRef<Record<number, HTMLAudioElement | null>>({})
+  const voiceVideoRefs = useRef<Record<number, HTMLVideoElement | null>>({})
+  const localScreenVideoRef = useRef<HTMLVideoElement | null>(null)
+  const voiceRemoteStreamsRef = useRef<Record<number, MediaStream>>({})
+  const voiceScreenSendersRef = useRef<Record<number, RTCRtpSender[]>>({})
+
+  const [voiceStatus, setVoiceStatus] = useState<'idle' | 'connecting' | 'live' | 'closed'>('idle')
+  const [voiceError, setVoiceError] = useState<string | null>(null)
+  const [voiceParticipants, setVoiceParticipants] = useState<{ id: number; username: string }[]>([])
+  const [isVoiceMuted, setIsVoiceMuted] = useState(false)
+  const [isVoiceDeafened, setIsVoiceDeafened] = useState(false)
+  const [isScreenSharing, setIsScreenSharing] = useState(false)
+  const [screenShareError, setScreenShareError] = useState<string | null>(null)
+  const [voiceSharingIds, setVoiceSharingIds] = useState<number[]>([])
+
+  const addVoiceParticipant = (participant: { id: number; username: string }) => {
+    setVoiceParticipants((current) =>
+      current.some((item) => item.id === participant.id)
+        ? current
+        : [...current, participant],
+    )
+  }
+
+  const removeVoiceParticipant = (remoteUserId: number) => {
+    setVoiceParticipants((current) =>
+      current.filter((participant) => participant.id !== remoteUserId),
+    )
+
+    if (voicePeersRef.current[remoteUserId]) {
+      voicePeersRef.current[remoteUserId].close()
+      delete voicePeersRef.current[remoteUserId]
+    }
+
+    delete voiceRemoteStreamsRef.current[remoteUserId]
+    delete voiceAudioRefs.current[remoteUserId]
+    delete voiceVideoRefs.current[remoteUserId]
+    delete voiceScreenSendersRef.current[remoteUserId]
+    setVoiceSharingIds((current) => current.filter((id) => id !== remoteUserId))
+  }
+
+  const stopScreenShare = () => {
+    if (voiceScreenStreamRef.current) {
+      voiceScreenStreamRef.current.getTracks().forEach((track) => track.stop())
+      voiceScreenStreamRef.current = null
+    }
+
+    if (localScreenVideoRef.current) {
+      localScreenVideoRef.current.srcObject = null
+    }
+
+    Object.entries(voiceScreenSendersRef.current).forEach(([remoteId, senders]) => {
+      const peer = voicePeersRef.current[Number(remoteId)]
+      senders.forEach((sender) => {
+        try {
+          peer.removeTrack(sender)
+        } catch {
+          // ignore if sender has already been removed
+        }
+        sender.track?.stop()
+      })
+    })
+    voiceScreenSendersRef.current = {}
+    setIsScreenSharing(false)
+    sendVoiceSignal({ action: 'screen-share-stop' })
+    setVoiceSharingIds((current) => current.filter((id) => id !== currentUser?.id))
+  }
+
+  const cleanupVoiceCall = () => {
+    try {
+      if (voiceSocketRef.current && voiceSocketRef.current.readyState === WebSocket.OPEN) {
+        voiceSocketRef.current.send(JSON.stringify({ action: 'leave', from: currentUser?.id }))
+      }
+    } catch (e) {
+      // ignore send errors
+    }
+
+    voiceSocketRef.current?.close()
+    voiceSocketRef.current = null
+
+    Object.values(voicePeersRef.current).forEach((peer) => peer.close())
+    voicePeersRef.current = {}
+    voiceRemoteStreamsRef.current = {}
+    voiceAudioRefs.current = {}
+    voiceVideoRefs.current = {}
+
+    voiceScreenStreamRef.current?.getTracks().forEach((track) => track.stop())
+    voiceScreenStreamRef.current = null
+    if (localScreenVideoRef.current) {
+      localScreenVideoRef.current.srcObject = null
+    }
+    Object.entries(voiceScreenSendersRef.current).forEach(([remoteId, senders]) => {
+      const peer = voicePeersRef.current[Number(remoteId)]
+      senders.forEach((sender) => {
+        try {
+          peer.removeTrack(sender)
+        } catch {
+          // ignore
+        }
+        sender.track?.stop()
+      })
+    })
+    voiceScreenSendersRef.current = {}
+
+    voiceLocalStreamRef.current?.getTracks().forEach((track) => track.stop())
+    voiceLocalStreamRef.current = null
+
+    setVoiceParticipants([])
+    setVoiceStatus('idle')
+    setVoiceError(null)
+    setIsVoiceMuted(false)
+    setIsVoiceDeafened(false)
+    setIsScreenSharing(false)
+    setScreenShareError(null)
+    setVoiceSharingIds([])
+  }
+
+  const sendVoiceSignal = (signal: Record<string, unknown>) => {
+    if (!voiceSocketRef.current || voiceSocketRef.current.readyState !== WebSocket.OPEN) {
+      return
+    }
+
+    const withFrom = {
+      ...signal,
+      from: currentUser?.id,
+    }
+
+    voiceSocketRef.current.send(JSON.stringify(withFrom))
+  }
+
+  const startScreenShare = async () => {
+    if (!voiceSocketRef.current || voiceSocketRef.current.readyState !== WebSocket.OPEN) {
+      setScreenShareError('Voice connection must be live to share screen.')
+      return
+    }
+
+    try {
+      let screenStream: MediaStream
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true })
+      } catch {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+      }
+
+      voiceScreenStreamRef.current = screenStream
+      if (localScreenVideoRef.current) {
+        localScreenVideoRef.current.srcObject = screenStream
+      }
+      setIsScreenSharing(true)
+      setScreenShareError(null)
+      sendVoiceSignal({ action: 'screen-share-start', username: currentUser?.username })
+      setVoiceSharingIds((current) =>
+        current.includes(currentUser?.id ?? 0)
+          ? current
+          : [...current, currentUser?.id ?? 0],
+      )
+
+      screenStream.getTracks().forEach((track) => {
+        track.onended = () => {
+          stopScreenShare()
+        }
+      })
+
+      Object.entries(voicePeersRef.current).forEach(([remoteId, peer]) => {
+        const senders: RTCRtpSender[] = []
+        screenStream.getTracks().forEach((track) => {
+          senders.push(peer.addTrack(track, screenStream))
+        })
+        voiceScreenSendersRef.current[Number(remoteId)] = senders
+      })
+    } catch (error) {
+      setScreenShareError('Unable to start screen share. Please allow access to a display.')
+    }
+  }
+
+  const getVoicePeer = (
+    remoteUserId: number,
+    remoteUsername: string,
+  ): RTCPeerConnection => {
+    const existing = voicePeersRef.current[remoteUserId]
+    if (existing) {
+      return existing
+    }
+
+    const peer = buildVoicePeerConnection(
+      remoteUserId,
+      remoteUsername,
+      voiceLocalStreamRef.current,
+      voiceAudioRefs,
+      voiceVideoRefs,
+      voiceRemoteStreamsRef,
+      addVoiceParticipant,
+      removeVoiceParticipant,
+      (signal) => {
+        sendVoiceSignal({ ...signal, to: remoteUserId })
+      },
+    )
+
+    if (isScreenSharing && voiceScreenStreamRef.current) {
+      const senders: RTCRtpSender[] = []
+      voiceScreenStreamRef.current.getTracks().forEach((track) => {
+        senders.push(peer.addTrack(track, voiceScreenStreamRef.current!))
+      })
+      voiceScreenSendersRef.current[remoteUserId] = senders
+    }
+
+    voicePeersRef.current[remoteUserId] = peer
+    addVoiceParticipant({ id: remoteUserId, username: remoteUsername })
+    return peer
+  }
 
   useEffect(() => {
     const loadMe = async () => {
@@ -509,6 +807,13 @@ function App() {
       return
     }
 
+    const activeChannel = channels.find((channel) => channel.id === selectedChannelId)
+    if (activeChannel?.channel_type === 'voice') {
+      setMessages([])
+      setIsLoadingMessages(false)
+      return
+    }
+
     const loadMessages = async () => {
       setIsLoadingMessages(true)
 
@@ -568,10 +873,18 @@ function App() {
     const user = currentUser
     const channelId = selectedChannelId
     const conversationId = selectedDirectConversationId
+    const activeChannel = channels.find((channel) => channel.id === channelId)
 
     if (workspaceMode === 'server' && (!channelId || !user)) {
       socketRef.current?.close()
       socketRef.current = null
+      return
+    }
+
+    if (workspaceMode === 'server' && activeChannel?.channel_type === 'voice') {
+      socketRef.current?.close()
+      socketRef.current = null
+      setSocketState('idle')
       return
     }
 
@@ -658,6 +971,189 @@ function App() {
   }, [selectedChannelId, selectedDirectConversationId, currentUser, workspaceMode])
 
   useEffect(() => {
+    if (workspaceMode !== 'server' || !selectedChannelId || !currentUser) {
+      cleanupVoiceCall()
+      return
+    }
+
+    const activeChannel = channels.find((channel) => channel.id === selectedChannelId)
+    if (activeChannel?.channel_type !== 'voice') {
+      cleanupVoiceCall()
+      return
+    }
+
+    let isMounted = true
+    setVoiceStatus('connecting')
+
+    const connectVoice = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        if (!isMounted) {
+          stream.getTracks().forEach((track) => track.stop())
+          return
+        }
+
+        voiceLocalStreamRef.current = stream
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = !isVoiceMuted
+        })
+
+        const socket = new WebSocket(buildWebSocketUrl('voice', selectedChannelId))
+        voiceSocketRef.current = socket
+
+        socket.addEventListener('open', () => {
+          setVoiceStatus('live')
+          setVoiceError(null)
+          sendVoiceSignal({
+            action: 'join',
+            username: currentUser.username,
+          })
+        })
+
+        socket.addEventListener('close', () => {
+          setVoiceStatus('closed')
+        })
+
+        socket.addEventListener('error', () => {
+          setVoiceStatus('closed')
+          setVoiceError('Realtime voice signaling is unavailable.')
+        })
+
+        socket.addEventListener('message', async (event) => {
+          const data = JSON.parse(event.data) as {
+            action: string
+            from?: number
+            to?: number
+            username?: string
+            payload?: { sdp?: RTCSessionDescriptionInit; candidate?: RTCIceCandidateInit }
+          }
+
+          if (data.from === currentUser.id) {
+            return
+          }
+
+          if (data.to && data.to !== currentUser.id) {
+            return
+          }
+
+          const remoteId = data.from ?? 0
+          const remoteUsername = data.username ?? 'Unknown'
+
+          switch (data.action) {
+            case 'join': {
+              addVoiceParticipant({ id: remoteId, username: remoteUsername })
+              const peer = getVoicePeer(remoteId, remoteUsername)
+              try {
+                const offer = await peer.createOffer()
+                await peer.setLocalDescription(offer)
+                sendVoiceSignal({
+                  action: 'offer',
+                  to: remoteId,
+                  payload: { sdp: offer },
+                })
+              } catch (error) {
+                console.warn('Voice offer creation failed', error)
+              }
+              break
+            }
+            case 'screen-share-start': {
+              setVoiceSharingIds((current) =>
+                current.includes(remoteId) ? current : [...current, remoteId],
+              )
+              addVoiceParticipant({ id: remoteId, username: remoteUsername })
+              break
+            }
+            case 'screen-share-stop': {
+              setVoiceSharingIds((current) => current.filter((id) => id !== remoteId))
+              break
+            }
+            case 'offer': {
+              const peer = getVoicePeer(remoteId, remoteUsername)
+              try {
+                await peer.setRemoteDescription(data.payload?.sdp!) 
+                const answer = await peer.createAnswer()
+                await peer.setLocalDescription(answer)
+                sendVoiceSignal({
+                  action: 'answer',
+                  to: remoteId,
+                  payload: { sdp: answer },
+                })
+              } catch (error) {
+                console.warn('Voice offer handling failed', error)
+              }
+              break
+            }
+            case 'answer': {
+              const peer = voicePeersRef.current[remoteId]
+              if (!peer) {
+                break
+              }
+              try {
+                await peer.setRemoteDescription(data.payload?.sdp!)
+              } catch (error) {
+                console.warn('Voice answer handling failed', error)
+              }
+              break
+            }
+            case 'candidate': {
+              const peer = voicePeersRef.current[remoteId]
+              if (!peer || !data.payload?.candidate) {
+                break
+              }
+              try {
+                await peer.addIceCandidate(data.payload.candidate)
+              } catch (error) {
+                console.warn('Voice ICE candidate failed', error)
+              }
+              break
+            }
+            case 'leave': {
+              removeVoiceParticipant(remoteId)
+              break
+            }
+            default:
+              break
+          }
+        })
+      } catch (error) {
+        setVoiceStatus('closed')
+        setVoiceError('Unable to access microphone. Allow microphone access and reload.')
+      }
+    }
+
+    void connectVoice()
+
+    return () => {
+      isMounted = false
+      cleanupVoiceCall()
+    }
+  }, [channels, currentUser, selectedChannelId, workspaceMode])
+
+  useEffect(() => {
+    if (!voiceLocalStreamRef.current) {
+      return
+    }
+
+    voiceLocalStreamRef.current.getAudioTracks().forEach((track) => {
+      track.enabled = !isVoiceMuted
+    })
+  }, [isVoiceMuted])
+
+  useEffect(() => {
+    Object.values(voiceAudioRefs.current).forEach((element) => {
+      if (element) {
+        element.muted = isVoiceDeafened
+      }
+    })
+  }, [isVoiceDeafened])
+
+  useEffect(() => {
+    if (localScreenVideoRef.current && voiceScreenStreamRef.current) {
+      localScreenVideoRef.current.srcObject = voiceScreenStreamRef.current
+    }
+  }, [isScreenSharing])
+
+  useEffect(() => {
     const feed = messageFeedRef.current
 
     if (feed) {
@@ -675,6 +1171,12 @@ function App() {
     members.find((member) => member.id === selectedMemberId) ?? null
   const canManageServer = Boolean(currentUser && activeServer?.is_owner)
   const activeMessages = workspaceMode === 'friends' ? directMessages : messages
+  const voiceParticipantRows = [
+    ...(currentUser
+      ? [{ id: currentUser.id, username: currentUser.username, isLocal: true }]
+      : []),
+    ...voiceParticipants.filter((participant) => participant.id !== currentUser?.id),
+  ]
   const activeTitle =
     workspaceMode === 'friends'
       ? activeDirectConversation
@@ -1656,106 +2158,301 @@ function App() {
               <div className="card chat-card">
                 <div className="chat-topline">
                   <div>
-                    <span className="eyebrow">Text chat</span>
-                    <h2>{activeChannel ? `#${activeChannel.name}` : 'No channel selected'}</h2>
+                    <span className="eyebrow">
+                      {activeChannel?.channel_type === 'voice' ? 'Voice chat' : 'Text chat'}
+                    </span>
+                    <h2>
+                      {activeChannel
+                        ? activeChannel.channel_type === 'voice'
+                          ? `🔊 ${activeChannel.name}`
+                          : `#${activeChannel.name}`
+                        : 'No channel selected'}
+                    </h2>
                   </div>
                   <span className="muted">
                     {activeServer?.owner_username ? `Owner: ${activeServer.owner_username}` : ''}
                   </span>
                 </div>
 
-                <div className="chat-feed" ref={messageFeedRef}>
-                  {isLoadingMessages ? <p className="placeholder">Loading messages...</p> : null}
+                {activeChannel?.channel_type === 'voice' ? (
+                  <div className="voice-panel">
+                    <div className="voice-status-panel">
+                      <div>
+                        <p>
+                          Voice channels let server members connect with audio in real time.
+                          Allow microphone access when prompted.
+                        </p>
+                      </div>
 
-                  {!currentUser ? (
-                    <div className="empty-state">
-                      <h3>Authentication required</h3>
-                      <p>Sign in to read history and post messages into the live room.</p>
+                      <div className="voice-controls">
+                        <span className={`status-chip status-${voiceStatus}`}>
+                          {voiceStatus === 'live'
+                            ? 'Live'
+                            : voiceStatus === 'connecting'
+                              ? 'Connecting'
+                              : voiceStatus === 'closed'
+                                ? 'Disconnected'
+                                : 'Idle'}
+                        </span>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => setIsVoiceMuted((current) => !current)}
+                          disabled={voiceStatus !== 'live'}
+                        >
+                          {isVoiceMuted ? 'Unmute' : 'Mute'}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => setIsVoiceDeafened((current) => !current)}
+                          disabled={voiceStatus !== 'live'}
+                        >
+                          {isVoiceDeafened ? 'Undeafen' : 'Deafen'}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => (isScreenSharing ? stopScreenShare() : startScreenShare())}
+                          disabled={voiceStatus !== 'live'}
+                        >
+                          {isScreenSharing ? 'Stop sharing' : 'Share screen'}
+                        </button>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          onClick={() => cleanupVoiceCall()}
+                          disabled={voiceStatus === 'idle'}
+                        >
+                          Leave
+                        </button>
+                      </div>
                     </div>
-                  ) : null}
 
-                  {currentUser && !activeChannel ? (
-                    <div className="empty-state">
-                      <h3>Select a channel</h3>
-                      <p>Pick a chat from the channel column to see and send messages.</p>
-                    </div>
-                  ) : null}
+                    {voiceError ? <div className="notice">{voiceError}</div> : null}
+                    {screenShareError ? <div className="notice">{screenShareError}</div> : null}
 
-                  {currentUser && activeChannel && activeMessages.length === 0 && !isLoadingMessages ? (
-                    <div className="empty-state">
-                      <h3>No messages yet</h3>
-                      <p>Be the first to send something here.</p>
-                    </div>
-                  ) : null}
+                    {voiceStatus === 'live' ? (
+                      <div className="voice-overview-grid">
+                        <div className="voice-members">
+                          <div className="voice-section-head">
+                            <h3>Voice participants ({voiceParticipantRows.length})</h3>
+                            <span className="muted">Connected to {activeChannel?.name || 'this room'}</span>
+                          </div>
+                          <ul className="voice-member-list">
+                            {voiceParticipantRows.map((participant) => {
+                            const isLocal = participant.id === currentUser?.id
+                            const isSharing = voiceSharingIds.includes(participant.id)
+                            return (
+                              <li className="voice-member-item" key={participant.id}>
+                                <span className={`voice-member-avatar ${isLocal ? 'voice-member-avatar-self' : ''}`}>
+                                  {initials(participant.username)}
+                                </span>
+                                <div className="voice-member-info">
+                                  <span className="voice-member-name">
+                                    {participant.username}{isLocal ? ' (You)' : ''}
+                                  </span>
+                                  <span className="voice-member-label">
+                                    {isLocal
+                                      ? isVoiceMuted
+                                        ? 'Muted locally'
+                                        : isVoiceDeafened
+                                          ? 'Deafened'
+                                          : 'Connected'
+                                      : 'Connected'}
+                                  </span>
+                                </div>
+                                <span className="voice-member-badges">
+                                  {isSharing ? (
+                                    <span className="voice-badge voice-badge-sharing">Sharing</span>
+                                  ) : (
+                                    <span className="voice-badge voice-badge-audio">Voice</span>
+                                  )}
+                                </span>
+                              </li>
+                            )
+                          })}
+                        </ul>
+                      </div>
 
-                  {activeMessages.map((message, index) => {
-                    const previous = activeMessages[index - 1]
-                    const showAvatar = index === 0 || previous.author !== message.author
-                    const authorUser =
-                      members.find((member) => member.user === message.author)
-                        ? toProfileUser(members.find((member) => member.user === message.author)!)
-                        : currentUser?.id === message.author
-                          ? currentUser
-                          : null
+                      <div className="voice-screens">
+                        <div className="voice-section-head">
+                          <h3>Screen sharing</h3>
+                          <span className="muted">Live previews for active presenters</span>
+                        </div>
+                        {voiceParticipantRows.filter((participant) => voiceSharingIds.includes(participant.id)).length > 0 ? (
+                          <div className="voice-screen-grid">
+                            {voiceParticipantRows
+                              .filter((participant) => voiceSharingIds.includes(participant.id))
+                              .map((participant) => {
+                                const isLocal = participant.id === currentUser?.id
+                                const previewStream = isLocal
+                                  ? voiceScreenStreamRef.current
+                                  : voiceRemoteStreamsRef.current[participant.id]
+                                const hasVideo = previewStream
+                                  ? previewStream.getVideoTracks().length > 0
+                                  : false
 
-                    return (
-                      <article className={`message-row ${showAvatar ? '' : 'message-row-grouped'}`} key={message.id}>
-                        {showAvatar ? (
-                          <div className="avatar small">
-                            {initials(message.author_username) || 'U'}
+                                return (
+                                  <div className="voice-screen-card" key={participant.id}>
+                                    <div className="voice-screen-header">
+                                      <strong>{participant.username}{isLocal ? ' (You)' : ''}</strong>
+                                      <span>{isLocal ? 'Your screen' : 'Sharing screen'}</span>
+                                    </div>
+                                    {hasVideo ? (
+                                      <video
+                                        ref={(element) => {
+                                          if (isLocal) {
+                                            localScreenVideoRef.current = element
+                                            if (element && previewStream) {
+                                              element.srcObject = previewStream
+                                            }
+                                          } else {
+                                            voiceVideoRefs.current[participant.id] = element
+                                            if (element && voiceRemoteStreamsRef.current[participant.id]) {
+                                              element.srcObject = voiceRemoteStreamsRef.current[participant.id]
+                                            }
+                                          }
+                                        }}
+                                        autoPlay
+                                        playsInline
+                                        muted
+                                      />
+                                    ) : (
+                                      <div className="voice-screen-placeholder">
+                                        <span>Preview unavailable</span>
+                                      </div>
+                                    )}
+                                  </div>
+                                )
+                              })}
                           </div>
                         ) : (
-                          <div className="message-spacer" />
-                        )}
-                        <div className="message-body">
-                          <div className="message-head">
-                            <button
-                              type="button"
-                              className="message-author-button"
-                              onClick={() => authorUser && openProfile(authorUser)}
-                              disabled={!authorUser}
-                            >
-                              <strong>{message.author_username}</strong>
-                            </button>
-                            <span>{formatDate(message.created_at)}</span>
-                            {message.edited_at ? <span>edited</span> : null}
+                          <div className="voice-screen-card voice-screen-empty">
+                            <div className="voice-screen-header">
+                              <strong>No one is sharing right now</strong>
+                            </div>
+                            <p>Use Share screen to broadcast your display to everyone in the voice channel.</p>
                           </div>
-                          <p>{message.content}</p>
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
+                        )}
+                      </div>
+                    </div>
 
-                <form className="composer" onSubmit={handleSendMessage}>
-                  <textarea
-                    value={composer}
-                    onChange={(event) => setComposer(event.target.value)}
-                    placeholder={
-                      currentUser && activeChannel
-                        ? `Message #${activeChannel.name}`
-                        : 'Sign in and pick a channel'
-                    }
-                    disabled={!currentUser || !activeChannel || socketState !== 'live'}
-                    rows={4}
-                  />
-
-                  <div className="composer-footer">
-                    <span className="helper">Enter to send. Shift + Enter for a new line.</span>
-                    <button
-                      className="primary-button"
-                      type="submit"
-                      disabled={
-                        !composer.trim() ||
-                        !currentUser ||
-                        !activeChannel ||
-                        socketState !== 'live'
-                      }
-                    >
-                      Send
-                    </button>
+                    <div style={{ display: 'none' }}>
+                      {voiceParticipantRows
+                        .filter((participant) => participant.id !== currentUser?.id)
+                        .map((participant) => (
+                          <audio
+                            key={participant.id}
+                            ref={(element) => {
+                              voiceAudioRefs.current[participant.id] = element
+                              if (element && voiceRemoteStreamsRef.current[participant.id]) {
+                                element.srcObject = voiceRemoteStreamsRef.current[participant.id]
+                              }
+                            }}
+                            autoPlay
+                            playsInline
+                            muted={isVoiceDeafened}
+                          />
+                        ))}
+                    </div>
                   </div>
-                </form>
+                ) : (
+                  <>
+                    <div className="chat-feed" ref={messageFeedRef}>
+                      {isLoadingMessages ? <p className="placeholder">Loading messages...</p> : null}
+
+                      {!currentUser ? (
+                        <div className="empty-state">
+                          <h3>Authentication required</h3>
+                          <p>Sign in to read history and post messages into the live room.</p>
+                        </div>
+                      ) : null}
+
+                      {currentUser && !activeChannel ? (
+                        <div className="empty-state">
+                          <h3>Select a channel</h3>
+                          <p>Pick a chat from the channel column to see and send messages.</p>
+                        </div>
+                      ) : null}
+
+                      {currentUser && activeChannel && activeMessages.length === 0 && !isLoadingMessages ? (
+                        <div className="empty-state">
+                          <h3>No messages yet</h3>
+                          <p>Be the first to send something here.</p>
+                        </div>
+                      ) : null}
+
+                      {activeMessages.map((message, index) => {
+                        const previous = activeMessages[index - 1]
+                        const showAvatar = index === 0 || previous.author !== message.author
+                        const authorUser =
+                          members.find((member) => member.user === message.author)
+                            ? toProfileUser(members.find((member) => member.user === message.author)!)
+                            : currentUser?.id === message.author
+                              ? currentUser
+                              : null
+
+                        return (
+                          <article className={`message-row ${showAvatar ? '' : 'message-row-grouped'}`} key={message.id}>
+                            {showAvatar ? (
+                              <div className="avatar small">
+                                {initials(message.author_username) || 'U'}
+                              </div>
+                            ) : (
+                              <div className="message-spacer" />
+                            )}
+                            <div className="message-body">
+                              <div className="message-head">
+                                <button
+                                  type="button"
+                                  className="message-author-button"
+                                  onClick={() => authorUser && openProfile(authorUser)}
+                                  disabled={!authorUser}
+                                >
+                                  <strong>{message.author_username}</strong>
+                                </button>
+                                <span>{formatDate(message.created_at)}</span>
+                                {message.edited_at ? <span>edited</span> : null}
+                              </div>
+                              <p>{message.content}</p>
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+
+                    <form className="composer" onSubmit={handleSendMessage}>
+                      <textarea
+                        value={composer}
+                        onChange={(event) => setComposer(event.target.value)}
+                        placeholder={
+                          currentUser && activeChannel
+                            ? `Message #${activeChannel.name}`
+                            : 'Sign in and pick a channel'
+                        }
+                        disabled={!currentUser || !activeChannel || socketState !== 'live'}
+                        rows={4}
+                      />
+
+                      <div className="composer-footer">
+                        <span className="helper">Enter to send. Shift + Enter for a new line.</span>
+                        <button
+                          className="primary-button"
+                          type="submit"
+                          disabled={
+                            !composer.trim() ||
+                            !currentUser ||
+                            !activeChannel ||
+                            socketState !== 'live'
+                          }
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </form>
+                  </>
+                )}
               </div>
             </>
           ) : (
